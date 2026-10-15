@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Ventus's Pond">
+<title>Ventus's Fish Pond</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#06394d;font-family:Arial,Helvetica,sans-serif;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
+canvas{display:block;width:100%;height:100%;touch-action:none;}
+#menu{position:absolute;top:8px;left:8px;z-index:2;opacity:.8;background:rgba(0,25,38,.72);border-radius:10px;padding:5px 8px;color:#fff;font-size:13px;line-height:1.3;box-sizing:border-box;max-width:calc(100% - 16px);}
+#menu button,#restore{font-size:13px;color:#fff;background:#167d94;border:1px solid #a5f0f3;border-radius:8px;padding:8px 10px;min-height:44px;min-width:60px;box-sizing:border-box;vertical-align:middle;}
+#menu button{margin-left:5px;}
+#menu button:disabled{opacity:.5;}
+#restore{display:none;position:absolute;top:8px;right:8px;z-index:3;min-width:44px;width:44px;height:44px;padding:0;font-size:12px;opacity:.5;}
+#count{font-weight:bold;color:#ffdb6a;}
+#tip{position:absolute;bottom:12px;left:0;right:0;text-align:center;color:rgba(255,255,255,.74);font-size:15px;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="menu">Ventus's Fish Pond &nbsp; <span id="count">0</span> caught <button id="more" title="Add one fish, up to 10">More Fish</button> <button id="turbo" aria-pressed="false">Turbo OFF</button> <button id="sound" aria-pressed="true">Sound ON</button> <button id="hide">Hide</button></div>
+<button id="restore" aria-label="Show controls">Menu</button>
+<canvas id="pond"></canvas><div id="tip">Tap the clownfish!</div><div id="status" style="display:none;position:absolute;top:65px;left:10px;right:10px;background:#fff;color:#222;font:16px Arial;padding:12px;z-index:6;">Starting fish pond...</div>
+<script>
+(function(){
+var canvas=document.getElementById('pond'),ctx=canvas.getContext('2d');
+var status=document.getElementById('status');
+window.onerror=function(msg){status.style.display='block';status.innerHTML='Game error: '+String(msg);return false;};
+if(!ctx){status.style.display='block';status.innerHTML='This Safari cannot start the pond.';return;}
+var fish=[],ripples=[],score=0,number=3,w=0,h=0,dpr=1,last=0;
+var soundButton=document.getElementById('sound'), menu=document.getElementById('menu'),tip=document.getElementById('tip');
+var soundOn=true,audio=null,audioOutput=null,audioUnlocked=false,audioFailed=false,lastTouch=-1000;
+var turbo=false,moreButton=document.getElementById('more'),turboButton=document.getElementById('turbo'),restoreButton=document.getElementById('restore');
+
+function soundFailure(){
+  if(audioFailed)return;
+  audioFailed=true;soundOn=false;
+  if(audioOutput)audioOutput.gain.value=0;
+  soundButton.textContent='Sound unavailable';soundButton.disabled=true;
+  soundButton.setAttribute('aria-pressed','false');
+  status.style.display='block';status.textContent='Sound is unavailable. The pond can still be played silently.';
+}
+function prepareAudio(){
+  if(!soundOn||audioFailed)return;
+  try{
+    if(!audio){
+      var AudioContext=window.AudioContext||window.webkitAudioContext;
+      if(!AudioContext)throw new Error('Web Audio is unavailable');
+      audio=new AudioContext();audioOutput=audio.createGain();
+      audioOutput.connect(audio.destination);
+    }
+    audioOutput.gain.value=1;
+    if(audio.state==='suspended'&&audio.resume){
+      var pending=audio.resume();
+      if(pending&&pending.then)pending.then(null,soundFailure);
+    }
+    /* iOS 9 unlock: start a silent buffer within the touch/click gesture. */
+    if(!audioUnlocked){
+      var unlock=audio.createBufferSource();
+      unlock.buffer=audio.createBuffer(1,1,audio.sampleRate);
+      unlock.connect(audioOutput);
+      unlock.onended=function(){unlock.disconnect();};
+      unlock.start(0);audioUnlocked=true;
+    }
+  }catch(err){soundFailure();}
+}
+function catchSound(){
+  if(!soundOn||audioFailed)return;
+  try{
+    var now=audio.currentTime,osc=audio.createOscillator(),gain=audio.createGain();
+    osc.type='sine';
+    osc.frequency.setValueAtTime(480,now);
+    osc.frequency.exponentialRampToValueAtTime(180,now+.14);
+    gain.gain.setValueAtTime(0,now);
+    gain.gain.linearRampToValueAtTime(.025,now+.006);
+    gain.gain.exponentialRampToValueAtTime(.0001,now+.15);
+    osc.connect(gain);gain.connect(audioOutput);
+    osc.onended=function(){osc.disconnect();gain.disconnect();};
+    osc.start(now);osc.stop(now+.16);
+  }catch(err){soundFailure();}
+}
+
+function resize(){
+  w=window.innerWidth||document.documentElement.clientWidth;
+  h=window.innerHeight||document.documentElement.clientHeight;
+  dpr=Math.min(window.devicePixelRatio||1,1.5);
+  canvas.width=Math.round(w*dpr);
+  canvas.height=Math.round(h*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+function random(a,b){return a+Math.random()*(b-a);}
+function clamp(v,a,b){return v<a?a:(v>b?b:v);}
+function wrapAngle(a){while(a>Math.PI)a-=Math.PI*2;while(a<-Math.PI)a+=Math.PI*2;return a;}
+function randSign(){return Math.random()<.5?-1:1;}
+
+function spawn(){
+  var size=random(24,40);
+  var angle=random(-Math.PI,Math.PI);
+  return {
+    x:random(70,Math.max(71,w-70)),
+    y:random(80,Math.max(81,h-55)),
+    size:size,
+    angle:angle,
+    speed:random(.7,1.4),
+    targetSpeed:random(.8,1.6),
+    turn:random(.006,.018)*randSign(),
+    wave:random(0,6.28),
+    depth:random(.92,1.1),
+    timer:random(40,110),
+    dart:0,
+    panicX:0,
+    panicY:0
+  };
+}
+function populate(){while(fish.length<number)fish.push(spawn());}
+function ripple(x,y){ripples.push({x:x,y:y,r:5,alpha:1});}
+
+function scareFish(x,y){
+  var i,f,dx,dy,d,force;
+  for(i=0;i<fish.length;i++){
+    f=fish[i];
+    dx=f.x-x;dy=f.y-y;d=Math.sqrt(dx*dx+dy*dy)||1;
+    if(d<f.size*5.5){
+      force=(f.size*5.5-d)/(f.size*5.5);
+      f.angle=Math.atan2(dy,dx)+random(-.35,.35);
+      f.dart=20+force*30;
+      f.targetSpeed=2.3+force*1.5;
+      f.timer=Math.min(f.timer,20);
+    }
+  }
+}
+
+function hit(x,y){
+  prepareAudio();
+  ripple(x,y);
+  scareFish(x,y);
+  var i,f,dx,dy,ca,sa,lx,ly,s;
+  for(i=fish.length-1;i>=0;i--){
+    f=fish[i];
+    ca=Math.cos(-f.angle);sa=Math.sin(-f.angle);
+    dx=x-f.x;dy=y-f.y;
+    lx=dx*ca-dy*sa;ly=dx*sa+dy*ca;
+    s=f.size;
+    if(((lx)/(s*1.35))*((lx)/(s*1.35))+((ly)/(s*.78))*((ly)/(s*.78))<1){
+      fish.splice(i,1);
+      score++;
+      document.getElementById('count').innerHTML=score;
+      catchSound();
+      ripple(f.x,f.y);
+      break;
+    }
+  }
+  populate();
+}
+
+function touch(e){
+  if(e.preventDefault)e.preventDefault();
+  lastTouch=new Date().getTime();
+  var rect=canvas.getBoundingClientRect(),i,t;
+  for(i=0;i<e.changedTouches.length;i++){
+    t=e.changedTouches[i];
+    hit(t.clientX-rect.left,t.clientY-rect.top);
+  }
+}
+canvas.addEventListener('touchstart',touch,false);
+canvas.addEventListener('mousedown',function(e){if(new Date().getTime()-lastTouch<700)return;var r=canvas.getBoundingClientRect();hit(e.clientX-r.left,e.clientY-r.top);},false);
+soundButton.onclick=function(){
+  soundOn=!soundOn;
+  soundButton.textContent=soundOn?'Sound ON':'Sound OFF';
+  soundButton.setAttribute('aria-pressed',soundOn?'true':'false');
+  if(soundOn)prepareAudio();else if(audioOutput)audioOutput.gain.value=0;
+};
+moreButton.onclick=function(){
+  if(number>=10)return;
+  number++;populate();
+  if(number===10){moreButton.disabled=true;moreButton.title='Maximum of 10 fish reached';}
+};
+turboButton.onclick=function(){
+  turbo=!turbo;
+  turboButton.textContent=turbo?'Turbo ON':'Turbo OFF';
+  turboButton.setAttribute('aria-pressed',turbo?'true':'false');
+};
+document.getElementById('hide').onclick=function(){menu.style.display='none';tip.style.display='none';restoreButton.style.display='block';};
+restoreButton.onclick=function(){menu.style.display='block';tip.style.display='block';restoreButton.style.display='none';};
+
+function background(time){
+  var g=ctx.createLinearGradient(0,0,0,h);
+  g.addColorStop(0,'#0e6d88');
+  g.addColorStop(.48,'#08536f');
+  g.addColorStop(1,'#072d48');
+  ctx.fillStyle=g;ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle='rgba(165,251,235,.12)';
+  ctx.lineWidth=2;
+  var j,x,y;
+  for(j=0;j<7;j++){
+    ctx.beginPath();
+    y=(j+1)*h/8;
+    for(x=0;x<=w+20;x+=18){
+      var yy=y+Math.sin(x/55+time*.0004+j)*8;
+      if(x===0)ctx.moveTo(x,yy); else ctx.lineTo(x,yy);
+    }
+    ctx.stroke();
+  }
+  for(j=0;j<14;j++){
+    ctx.beginPath();
+    ctx.arc((j*127+time*.02)% (w+30)-15, 25+((j*67)%80), 1.8+((j%3)*.7), 0, Math.PI*2);
+    ctx.fillStyle='rgba(255,255,255,.12)';
+    ctx.fill();
+  }
+}
+
+function drawFin(x1,y1,x2,y2,x3,y3){
+  ctx.beginPath();
+  ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.lineTo(x3,y3);ctx.closePath();ctx.fill();
+}
+
+function drawClownFish(f,time){
+  ctx.save();
+  ctx.translate(f.x,f.y);
+  ctx.rotate(f.angle);
+  var s=f.size;
+  var tailSwing=Math.sin(time*.014*f.speed+f.wave)*s*.22;
+  var bodyW=s*2.05, bodyH=s*1.06;
+
+  ctx.fillStyle='rgba(0,0,0,.18)';
+  ctx.beginPath();
+  ctx.save();ctx.translate(2,8);ctx.scale(bodyW*.53,bodyH*.48);ctx.arc(0,0,1,0,Math.PI*2);ctx.restore();
+  ctx.fill();
+
+  ctx.fillStyle='rgba(255,255,255,.22)';
+  drawFin(-s*.22,0,s*.08,-s*.55,s*.18,-s*.05);
+  drawFin(-s*.1,s*.1,s*.1,s*.58,s*.33,s*.14);
+
+  ctx.save();
+  ctx.translate(-bodyW*.6,0);
+  ctx.rotate(tailSwing/s*.7);
+  ctx.fillStyle='#f47e20';
+  ctx.beginPath();
+  ctx.moveTo(-s*.15,0);
+  ctx.lineTo(-s*1.02,-s*.75);
+  ctx.quadraticCurveTo(-s*.62,0,-s*1.02,s*.75);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle='#111';
+  ctx.lineWidth=Math.max(1,s*.08);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle='#f47e20';
+  ctx.beginPath();
+  ctx.moveTo(-bodyW*.5,0);
+  ctx.quadraticCurveTo(-bodyW*.35,-bodyH*.52,bodyW*.2,-bodyH*.45);
+  ctx.quadraticCurveTo(bodyW*.58,-bodyH*.38,bodyW*.72,-bodyH*.1);
+  ctx.quadraticCurveTo(bodyW*.83,0,bodyW*.72,bodyH*.1);
+  ctx.quadraticCurveTo(bodyW*.58,bodyH*.38,bodyW*.2,bodyH*.45);
+  ctx.quadraticCurveTo(-bodyW*.35,bodyH*.52,-bodyW*.5,0);
+  ctx.fill();
+  ctx.strokeStyle='#111';
+  ctx.lineWidth=Math.max(1,s*.07);
+  ctx.stroke();
+
+  ctx.fillStyle='#fff';
+  ctx.strokeStyle='#111';
+  ctx.lineWidth=Math.max(1,s*.075);
+  function band(cx, halfW){
+    ctx.beginPath();
+    ctx.moveTo(cx-halfW,-bodyH*.48);
+    ctx.quadraticCurveTo(cx-halfW*.82,0,cx-halfW,bodyH*.48);
+    ctx.lineTo(cx+halfW,bodyH*.4);
+    ctx.quadraticCurveTo(cx+halfW*.75,0,cx+halfW,-bodyH*.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  band(-s*.65,s*.18);
+  band(-s*.02,s*.22);
+  band(s*.58,s*.14);
+
+  ctx.fillStyle='rgba(255,255,255,.25)';
+  ctx.beginPath();
+  ctx.save();ctx.translate(s*.04,-s*.23);ctx.rotate(-.06);ctx.scale(s*.7,s*.14);ctx.arc(0,0,1,0,Math.PI*2);ctx.restore();
+  ctx.fill();
+
+  ctx.fillStyle='rgba(255,255,255,.2)';
+  drawFin(-s*.02,-s*.1,s*.33,-s*.72,s*.52,-s*.12);
+  drawFin(s*.08,s*.12,s*.45,s*.68,s*.65,s*.16);
+
+  ctx.fillStyle='#fff';
+  ctx.beginPath();
+  ctx.arc(bodyW*.45,-s*.08,s*.15,0,Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle='#111';
+  ctx.beginPath();
+  ctx.arc(bodyW*.49,-s*.08,s*.075,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.strokeStyle='rgba(255,255,255,.65)';
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(bodyW*.7,-s*.03);
+  ctx.quadraticCurveTo(bodyW*.84,0,bodyW*.7,s*.03);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function updateFish(f,t,dt){
+  f.timer-=dt;
+  if(f.timer<=0){
+    f.timer=random(35,100);
+    f.turn=random(.004,.017)*randSign();
+    f.targetSpeed=random(.75,1.45);
+    if(Math.random()<.18){
+      f.dart=random(18,38);
+      f.targetSpeed=random(1.8,2.7);
+    }
+  }
+
+  var margin=f.size*1.8;
+  var nearEdge=f.x<margin||f.x>w-margin||f.y<50||f.y>h-35;
+  if(nearEdge){
+    var desired=Math.atan2(h*.5-f.y,w*.5-f.x);
+    var diff=wrapAngle(desired-f.angle);
+    f.angle+=diff*.07*dt;
+    f.targetSpeed=Math.max(f.targetSpeed,1.35);
+  } else {
+    f.angle+=f.turn*dt;
+  }
+
+  if(f.dart>0){
+    f.dart-=dt;
+    f.speed+=(f.targetSpeed-f.speed)*.085*dt;
+  } else {
+    f.speed+=(f.targetSpeed-f.speed)*.03*dt;
+  }
+  f.speed=clamp(f.speed,.45,3.2);
+
+  var sway=Math.sin(t*.0032*f.speed+f.wave)*.012;
+  f.angle+=sway*dt;
+  /* Scale travel only: preserve the original steering, timing and tail motion. */
+  var swimScale=turbo?(f.dart>0?1.85:1.5):1;
+  f.x+=Math.cos(f.angle)*f.speed*2.0*f.depth*dt*swimScale;
+  f.y+=Math.sin(f.angle)*f.speed*1.45*f.depth*dt*swimScale + Math.sin(t*.0022+f.wave)*.18*dt;
+
+  if(f.x<-margin){f.x=w+margin;f.y=clamp(f.y,65,h-45);} else if(f.x>w+margin){f.x=-margin;f.y=clamp(f.y,65,h-45);} 
+  if(f.y<42){f.y=42;f.angle=Math.abs(f.angle);} else if(f.y>h-24){f.y=h-24;f.angle=-Math.abs(f.angle);} 
+}
+
+var raf=window.requestAnimationFrame||window.webkitRequestAnimationFrame||function(fn){return setTimeout(function(){fn(new Date().getTime());},33);};
+function render(t){
+  if(!last)last=t;
+  var dt=Math.min((t-last)/16.667,2.2);
+  last=t;
+  background(t);
+  var i,f,r;
+  for(i=0;i<fish.length;i++){
+    f=fish[i];
+    updateFish(f,t,dt);
+    drawClownFish(f,t);
+  }
+  for(i=ripples.length-1;i>=0;i--){
+    r=ripples[i];
+    ctx.beginPath();
+    ctx.arc(r.x,r.y,r.r,0,Math.PI*2);
+    ctx.lineWidth=3;
+    ctx.strokeStyle='rgba(194,255,248,'+r.alpha+')';
+    ctx.stroke();
+    r.r+=2.6*dt;
+    r.alpha-=.027*dt;
+    if(r.alpha<=0)ripples.splice(i,1);
+  }
+  raf(render);
+}
+
+status.style.display='block';status.innerHTML='Loading clownfish...';
+resize();
+window.addEventListener('resize',resize,false);
+window.addEventListener('orientationchange',function(){window.setTimeout(resize,200);},false);
+window.addEventListener('pageshow',resize,false);
+populate();
+try{background(0);for(var k=0;k<fish.length;k++)drawClownFish(fish[k],0);status.style.display='none';raf(render);}catch(err){status.style.display='block';status.innerHTML='Game error: '+err.message;}
+})();
+</script>
+</body>
+</html>
